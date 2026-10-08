@@ -1,0 +1,148 @@
+# ---------- 0. Thư viện & cấu hình ----------
+pkgs <- c("readxl", "dplyr", "tidyr", "ggplot2", "scales")
+thieu <- pkgs[!pkgs %in% rownames(installed.packages())]
+if (length(thieu)) install.packages(thieu)
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+DATA_DIR <- "."
+OUT_DIR  <- "output"
+dir.create(OUT_DIR, showWarnings = FALSE)
+
+MON_CHON <- c("toan", "van", "nn", "ly", "hoa")
+
+TO_HOP <- list(
+  A00 = c("toan", "ly", "hoa"),
+  A01 = c("toan", "ly", "nn"),
+  D01 = c("toan", "van", "nn")
+)
+
+nhan_mon <- c(toan = "Toán", van = "Ngữ văn", nn = "Tiếng Anh", ly = "Vật lí",
+              hoa = "Hóa học", sinh = "Sinh học", su = "Lịch sử", dia = "Địa lí",
+              gdktpl = "GD KT&PL", tinhoc = "Tin học",
+              cnnongnghiep = "CN Nông nghiệp", cncongnghiep = "CN Công nghiệp")
+
+doc_file <- function(ten_file) {
+  path <- file.path(DATA_DIR, ten_file)
+  rds  <- file.path(OUT_DIR, paste0(tools::file_path_sans_ext(ten_file), ".rds"))
+  if (file.exists(rds)) return(readRDS(rds))
+  message("Đang đọc ", ten_file, " (có thể mất vài phút)...")
+  n_cot <- length(names(read_excel(path, n_max = 0)))
+  df <- read_excel(path, col_types = c(rep("numeric", n_cot - 1), "text"))
+  names(df) <- tolower(gsub("[^A-Za-z]", "", names(df)))
+  saveRDS(df, rds)
+  df
+}
+
+a1 <- doc_file("2025-ketquathi-ct2018a-1.xlsx")
+a2 <- doc_file("2025-ketquathi-ct2018a-2.xlsx")
+d06 <- doc_file("2025-ketquathi-ct2006.xlsx")
+
+d18 <- bind_rows(a1, a2)
+
+d18 <- d18 %>% mutate(nn = ifelse(!is.na(mann) & mann == "N1", nn, NA_real_))
+
+cat("Số thí sinh CT2018:", nrow(d18), "| CT2006:", nrow(d06), "\n")
+cat("Trùng số báo danh:", sum(duplicated(d18$sobaodanh)), "\n")
+
+mode_val <- function(x) {
+  t <- table(x)
+  as.numeric(names(t)[which.max(t)])
+}
+skew_val <- function(x) mean(((x - mean(x)) / sd(x))^3)
+
+tom_tat <- function(x) {
+  tibble(
+    n         = length(x),
+    trung_binh = mean(x),
+    trung_vi  = median(x),
+    mode      = mode_val(x),
+    do_lech_chuan = sd(x),
+    min       = min(x),
+    Q1        = unname(quantile(x, 0.25)),
+    Q3        = unname(quantile(x, 0.75)),
+    max       = max(x),
+    do_lech   = skew_val(x),
+    so_diem_10 = sum(x == 10),
+    so_diem_le1 = sum(x <= 1),
+    pct_duoi_5 = 100 * mean(x < 5)
+  )
+}
+
+ve_pho <- function(x, tieu_de, xmax = 10, binwidth = 0.25, nhan_x = "Điểm") {
+  tb <- mean(x); tv <- median(x)
+  ggplot(tibble(diem = x), aes(diem)) +
+    geom_histogram(binwidth = binwidth, boundary = 0,
+                   fill = "#2b6cb0", colour = "white", linewidth = 0.1) +
+    geom_vline(xintercept = tb, colour = "#c53030", linewidth = 0.8) +
+    geom_vline(xintercept = tv, colour = "#2f855a", linewidth = 0.8, linetype = "dashed") +
+    scale_x_continuous(breaks = seq(0, xmax, by = ifelse(xmax > 10, 3, 1))) +
+    scale_y_continuous(labels = label_comma()) +
+    labs(title = tieu_de,
+         subtitle = sprintf("n = %s | TB = %.2f (đỏ) | trung vị = %.2f (xanh, nét đứt) | độ lệch chuẩn = %.2f",
+                            format(length(x), big.mark = ","), tb, tv, sd(x)),
+         x = nhan_x, y = "Số thí sinh") +
+    theme_minimal(base_size = 12)
+}
+
+cac_mon <- names(nhan_mon)
+dai <- d18 %>%
+  select(all_of(cac_mon)) %>%
+  pivot_longer(everything(), names_to = "mon", values_to = "diem") %>%
+  filter(!is.na(diem)) %>%
+  mutate(mon = factor(mon, levels = cac_mon, labels = nhan_mon[cac_mon]))
+
+bang_mon <- dai %>% group_by(mon) %>% group_modify(~ tom_tat(.x$diem)) %>% ungroup()
+print(as.data.frame(bang_mon), digits = 3)
+write.csv(bang_mon, file.path(OUT_DIR, "thong_ke_cac_mon.csv"),
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+for (m in MON_CHON) {
+  x <- d18[[m]]; x <- x[!is.na(x)]
+  p <- ve_pho(x, paste("Phổ điểm môn", nhan_mon[m], "- THPT 2025"))
+  ggsave(file.path(OUT_DIR, paste0("pho_", m, ".png")), p, width = 9, height = 5, dpi = 300)
+}
+
+p_all <- ggplot(dai, aes(diem)) +
+  geom_histogram(binwidth = 0.25, boundary = 0, fill = "#2b6cb0", colour = "white", linewidth = 0.05) +
+  facet_wrap(~ mon, scales = "free_y", ncol = 3) +
+  scale_x_continuous(breaks = 0:10) +
+  scale_y_continuous(labels = label_comma()) +
+  labs(title = "Phổ điểm 12 môn thi tốt nghiệp THPT 2025", x = "Điểm", y = "Số thí sinh") +
+  theme_minimal(base_size = 11)
+ggsave(file.path(OUT_DIR, "pho_12_mon.png"), p_all, width = 12, height = 12, dpi = 300)
+
+doi_chieu <- tibble(
+  mon = c("Toán", "Tiếng Anh"),
+  vnexpress_tb = c(4.78, 5.38),
+  vnexpress_so_diem_10 = c(513, 141)
+) %>%
+  left_join(bang_mon %>% select(mon, tinh_duoc_tb = trung_binh, tinh_duoc_so_diem_10 = so_diem_10),
+            by = "mon")
+print(as.data.frame(doi_chieu))
+
+GOP_CT2006 <- FALSE
+nguon <- if (GOP_CT2006) bind_rows(d18, d06) else d18
+
+tinh_to_hop <- function(d, cols) {
+  d %>%
+    filter(if_all(all_of(cols), ~ !is.na(.x))) %>%
+    mutate(tong = rowSums(across(all_of(cols))))
+}
+
+bang_th <- list()
+for (ten in names(TO_HOP)) {
+  th <- tinh_to_hop(nguon, TO_HOP[[ten]])
+  x <- th$tong
+  bang_th[[ten]] <- tom_tat(x) %>% mutate(to_hop = ten, .before = 1)
+  p <- ve_pho(x, sprintf("Phổ điểm tổ hợp %s (%s) - THPT 2025", ten,
+                         paste(nhan_mon[TO_HOP[[ten]]], collapse = " + ")),
+              xmax = 30, binwidth = 0.25, nhan_x = "Tổng điểm 3 môn")
+  ggsave(file.path(OUT_DIR, paste0("pho_", ten, ".png")), p, width = 9, height = 5, dpi = 300)
+}
+bang_th <- bind_rows(bang_th)
+print(as.data.frame(bang_th), digits = 3)
+write.csv(bang_th, file.path(OUT_DIR, "thong_ke_to_hop.csv"),
+          row.names = FALSE, fileEncoding = "UTF-8")
+
+cat("\nXong. Xem thư mục:", normalizePath(OUT_DIR), "\n")
+
